@@ -1,0 +1,536 @@
+#!/bin/bash
+
+# DEPS  sudo apt install isc-dhcp-client
+
+# TODO install from ppa: vpnclient vpncmd
+# TODO unmask vpnclient if masked
+
+
+########
+# FUNC #
+########
+
+
+# FUNC: System
+
+Usage ()
+{
+    cat <<EOF >&2
+NAME: $( basename "$( readlink -f "$BASH_SOURCE" )" )
+DESC: SoftEther client wrapper for VPN-SSL protocol
+AUTH: elias@gnos.in
+DEPS: SoftEther vpnclient + vpncmd
+DEPS: isc-dhcp-client
+
+USAGE:
+  [ OPTS ... ] PROFILE_NAME IP_ADDR TCP_PORT [ USER_NAME PASSWORD [HUB_NAME] ]
+  -d PROFILE_NAME
+
+ARGS:
+  PROFILE_NAME    Profile name
+  IP_ADDR         Server IP address
+  TCP_PORT        Server TCP port
+  USER_NAME       Account login
+  PASSWORD        Account password
+  HUB_NAME        Server hub
+
+OPTS:
+  -d PROFILE_NAME Disconnect profile
+  -l              List active profiles
+  -h              Show help
+  -r              Force reconnect
+  -p HTTP_PROXY   HTTP proxy:    [http://][user[:password]@]host[:port]
+  -s SOCKS_PROXY  SOCKS4 proxy: [socks://][user[:password]@]host[:port]
+  -v              Verbose output
+EOF
+    exit 1
+}
+
+Die ()
+{
+    echo "ERROR: $*" >&2
+    # [[ -n "$profileName" ]] && Disconnect "$profileName"
+    exit 1
+}
+
+Say ()
+{
+    [[ -n "$verbose" ]] && echo "$@" >&2
+    return 0
+}
+
+
+# FUNC: String
+
+# str::SanitizeStringAllow () # $1:ALLOWED_CHARS $2:INPUT
+# {
+#     echo -n "$2" | tr -c "$1"'_[:alnum:]' '-'
+# }
+
+# str::SanitizeString () # $*:INPUT
+# {
+#     str::SanitizeStringAllow "" "$*"
+# }
+
+
+# FUNC: Proxy
+# STOLEN FROM http://vpalos.com/537/uri-parsing-using-bash-built-in-features/
+#
+# URI parsing function
+#
+# The function creates global variables with the parsed results.
+# It returns 0 if parsing was successful or non-zero otherwise.
+#
+# [schema://][user[:password]@]host[:port][/path][?[arg1=val1]...][#fragment]
+#
+function ParseUri ()
+{
+    # uri capture
+    uri="$@"
+
+    # safe escaping
+    uri="${uri//\`/%60}"
+    uri="${uri//\"/%22}"
+
+    # top level parsing
+    pattern='^(([a-z]{3,5})://)?((([^:\/]+)(:([^@\/]*))?@)?([^:\/?]+)(:([0-9]+))?)(\/[^?]*)?(\?[^#]*)?(#.*)?$'
+    [[ "$uri" =~ $pattern ]] || return 1;
+
+    # component extraction
+    uri=${BASH_REMATCH[0]}
+    uri_schema=${BASH_REMATCH[2]}
+    uri_address=${BASH_REMATCH[3]}
+    uri_user=${BASH_REMATCH[5]}
+    uri_password=${BASH_REMATCH[7]}
+    uri_host=${BASH_REMATCH[8]}
+    uri_port=${BASH_REMATCH[10]}
+    uri_path=${BASH_REMATCH[11]}
+    uri_query=${BASH_REMATCH[12]}
+    uri_fragment=${BASH_REMATCH[13]}
+
+    # path parsing
+    count=0
+    path="$uri_path"
+    pattern='^/+([^/]+)'
+    while [[ $path =~ $pattern ]]; do
+        eval "uri_parts[$count]=\"${BASH_REMATCH[1]}\""
+        path="${path:${#BASH_REMATCH[0]}}"
+        let count++
+    done
+
+    # query parsing
+    count=0
+    query="$uri_query"
+    pattern='^[?&]+([^= ]+)(=([^&]*))?'
+    while [[ $query =~ $pattern ]]; do
+        eval "uri_args[$count]=\"${BASH_REMATCH[1]}\""
+        eval "uri_arg_${BASH_REMATCH[1]}=\"${BASH_REMATCH[3]}\""
+        query="${query:${#BASH_REMATCH[0]}}"
+        let count++
+    done
+
+    # return success
+    return 0
+}
+
+
+# FUNC: Softether
+
+InstallVpnClient ()
+{
+    Die 'ERROR: not implemented, do it by yourself !
+
+  # Dependency: OpenSSL 1.1.0g-2
+  # WORK: libssl1.1 from PPA:ondrej/php
+  # WARN: will upgrade your php-* packages
+  # TODO: find another source
+     [[ "$(lsb_release -cs)" != "bionic" ]] \
+  && sudo add-apt-repository ppa:ondrej/php
+  
+  # Softether 4.25-9656-rtm from PPA:ast/softether-test
+  sudo add-apt-repository ppa:ast/softether-test
+  sudo apt-get update
+  sudo apt-get -f -y install --no-install-recommends
+      softether-vpnclient \
+      softether-vpncmd
+'
+
+}
+
+CheckVpnClient ()
+{
+    # Install
+    if ! which vpncmd    &>/dev/null \
+    && ! which vpnclient &>/dev/null ; then
+        InstallVpnClient
+    fi
+
+    # Start
+    if ! systemctl -q is-active vpnclient.service ; then
+        
+        # DEV: unmask vpnclient if masked
+        local target="$( readlink -f /etc/systemd/system/vpnclient.service 2>/dev/null )"
+        if [[ "$target" == "/dev/null" ]] ; then
+            systemctl unmask vpnclient.service >&2
+        fi
+
+        systemctl restart vpnclient.service >&2
+    
+    fi
+
+    systemctl -q is-active vpnclient.service || Die "Failed starting Softether VPN Client"
+
+    # Check
+    local tst=$( RunVpnClientCsvCmd VersionGet | awk -F',' 'NR>3{print $2;exit}' )
+    [[ -z "$tst" ]] && return 1
+    return 0
+}
+
+RunVpnClientCmd ()
+{
+    vpncmd localhost /CLIENT /CMD "$@"
+}
+
+RunVpnClientCmds () # $1
+{
+    vpncmd localhost /CLIENT /IN:"$1"
+}
+
+RunVpnClientCsvCmd ()
+{
+    vpncmd localhost /CLIENT /CSV /CMD "$@"
+}
+
+# GetVpnNics ()
+# {
+#     RunVpnClientCsvCmd NicList | awk -F',' 'NR>3{print $1}'
+# }
+
+# GetVpnProfiles ()
+# {
+#     RunVpnClientCsvCmd AccountList | awk -F',' 'NR>3{print $1}'
+# }
+
+GetVpnStatus () # $1:PROFILENAME
+{
+      RunVpnClientCmd AccountStatusGet $1 \
+    | awk -F'|' '$2=="Value"{ok=1} $1~/^Session Status/{s=$2} END{ if (ok!=1) {exit 1}; print s}'
+}
+
+DisconnectVpnCLient () # $1:PROFILENAME
+{
+    RunVpnClientCmd AccountDisconnect $1
+    RunVpnClientCmd AccountDelete     $1
+    RunVpnClientCmd NicDisable        $1
+    RunVpnClientCmd NicDelete         $1
+}
+
+ConnectVpnCLient () # $1:PROFILENAME $2:IP $3:TCP $4:USERNAME $5:PASSWORD $6:HUBNAME
+{
+
+    local profileName=$1
+    local serverIp=$2
+    local serverTcp=$3
+    local userName=${4:-vpn}
+    local userPass="$5"
+    local hubName=${6:-vpngate}
+
+
+    local tmpCommand=$( mktemp -p /tmp tmp.vpn.XXXX.cmd )
+
+    # vpnclient: Create command file
+    cat <<EOF >"$tmpCommand"
+AccountDisconnect $profileName
+AccountDelete $profileName
+NicDisable $profileName
+NicDelete $profileName
+NicCreate $profileName
+AccountCreate $profileName /SERVER:$serverIp:$serverTcp /HUB:$hubName ${userName:+"/USERNAME:$userName"} /NICNAME:$profileName
+EOF
+
+    ## Credentials
+    if [[ -n "$userPass" ]] ; then
+        cat <<EOF >>"$tmpCommand"
+AccountPasswordSet $profileName /PASSWORD:$userPass /TYPE:standard
+EOF
+    fi
+
+    ## HTTP/SOCKS4 Proxy support
+    if [[ -n "$socks" ]] ; then
+           ParseUri "$socks" \
+        && [[ -z "$uri_schema" || "$uri_schema" == "socks" ]] \
+        && [[ -n "$uri_port" ]] \
+        && cat >>"$tmpCommand" \
+            <<<"AccountProxySocks $profileName /SERVER:${uri_address#*@} ${uri_user:+"/USERNAME:$uri_user"} ${uri_password:+"/PASSWORD:$uri_password"}" \
+        || Die "Invalid SOCKS proxy: $socks"
+    elif [[ -n "$proxy" ]] ; then
+           ParseUri "$proxy" \
+        && [[ -z "$uri_schema" || "$uri_schema" == "http" ]] \
+        && [[ -n "$uri_port" ]] \
+        && cat >>"$tmpCommand" \
+            <<<"AccountProxyHttp $profileName /SERVER:${uri_address#*@} ${uri_user:+"/USERNAME:$uri_user"} ${uri_password:+"/PASSWORD:$uri_password"}" \
+        || Die "Invalid HTTP proxy: $proxy"
+    fi
+
+
+    # vpnclient: Start vpn
+    cat >>"$tmpCommand" <<<"AccountConnect $profileName"
+    Say "Connecting server: $serverIp:$serverTcp"
+    RunVpnClientCmds "$tmpCommand" &>/dev/null
+    rm -rf "$tmpCommand"
+}
+
+
+
+# FUNC: Main
+
+Connect () # $1:PROFILENAME $2:IP $3:TCP $4:USERNAME $5:PASSWORD $6:HUBNAME
+{
+    CheckVpnClient || Die "Failed to probe vpnclient"
+
+
+    local profileName=$1
+    local serverIp=$2
+    local serverTcp=$3
+    local userName=${4:-vpn}
+    local userPass="$5"
+    local hubName=${6:-vpngate}
+
+
+    # Softether: Check already running
+    status=$( GetVpnStatus $profileName )
+    if [[ $status =~ ^Connection\ Completed ]] ; then
+        Say "Profile already connected: $profileName"
+        exit 42
+    fi
+# TODO more checks: netns, ip addr ?
+
+
+    # Softether: Connect VPN
+    ConnectVpnCLient "$@"
+
+
+    # Softether: Wait up
+    local mode=0 retry=0 status pstatus
+    while [[ $mode -eq 0 ]] && [[ $retry -lt $connectTimeoutHalfSeconds ]] ; do
+        status=$( GetVpnStatus $profileName )
+        [[ $? -ne 0 ]] && Die "Connection failed"
+        [[ "$status" != "$pstatus" ]] && Say "Status: $status"
+        [[ $status =~ ^Connection\ Completed ]] && mode=1 && break
+        (( retry++ ))
+        pstatus="$status"
+        sleep .5
+    done
+    [[ $mode -eq 0 ]] && Die "Connection failed"
+
+    local nicName=vpn_$profileName # DEV: Softether prefixes with vpn_
+
+
+    # netns
+    local nsName=$prefix$profileName
+
+    Say "Creating netns: $nsName"
+    ip netns add $nsName
+    [[ -z "$( ip netns show $nsName )" ]] && Die "Failed to create namespace"
+
+
+    # dhclient
+    Say "Configuring interface: $nicName"
+
+    mkdir -p "$cache/"
+    
+    local tmpLeases="$cache/dhclient.leases"
+    touch "$tmpLeases"
+    chown --reference="$cache" "$tmpLeases"
+
+    local tmpScript="$cache/dhclient-script"
+    cat <<EOF >"$tmpScript"
+#!/bin/bash
+
+# INIT
+nsName=$nsName
+EOF
+# DEBUG set -x
+    cat <<'EOF' >>"$tmpScript"
+case $reason in
+    BOUND|REBOOT) ;;
+    *) exit 0 ;;
+esac
+
+ip="ip netns exec $nsName ip"
+
+# NETNS
+ip link set $interface netns $nsName
+
+# ADDR
+$ip addr \
+    add $new_ip_address/$new_subnet_mask \
+    broadcast $new_broadcast_address \
+    dev $interface label $interface
+$ip link set $interface up
+
+# GW
+$ip route add default via $new_next_server
+
+# DNS
+mkdir -p /etc/netns/$nsName/
+echo >/etc/netns/$nsName/resolv.conf
+for i in $new_domain_name_servers ; do
+    echo "nameserver $i" >>/etc/netns/$nsName/resolv.conf
+done
+EOF
+    chmod +rx "$tmpScript"
+    chown --reference="$cache" "$tmpScript"
+
+       aa-enabled -q &>/dev/null \
+    && apparmor_parser -R /etc/apparmor.d/sbin.dhclient
+
+    dhclient $verbose -1 -4 \
+        -sf "$tmpScript" \
+        -lf "$tmpLeases" \
+        -cf /dev/null \
+        --no-pid \
+        $nicName >&2
+
+       aa-enabled -q &>/dev/null \
+    && apparmor_parser /etc/apparmor.d/sbin.dhclient
+
+    local ifconfig="$( ip netns exec $nsName ip addr show dev $nicName 2>/dev/null )"
+    [[ -n "$verbose" && -n "$ifconfig" ]] && echo "$ifconfig"
+    grep -q 'inet ' <<<"$ifconfig" || Die "DHCP assignation failed"
+
+    return 0
+}
+
+
+Disconnect () # $1:PROFILENAME
+{
+
+    local profileName=$1
+    local nsName=$prefix$profileName
+
+    Say "Disconnecting profile: $profileName"
+
+    {
+        # Kill processes
+        pids=$( ip netns pids $nsName )
+        [[ -n "$pids" ]] && kill -15 $pids
+        sleep 1
+        pids=$( ip netns pids $nsName )
+        [[ -n "$pids" ]] && kill -9 $pids
+
+        # Clear Softether
+        DisconnectVpnCLient $profileName
+
+        # Kill DHCP client
+        [[ -d "$cache" ]] && pkill --uid 0 --full '^dhclient .* '"$cache"'/dhclient-script'
+
+        # Clean netns
+        ip netns delete $nsName
+        rm -rf "/etc/netns/$nsName/"
+        
+        # Clean profile cache
+        if [[ -d "$cache" ]] ; then
+            rm -f "$cache"/dhclient{-script,.leases} "$cache"/*.json
+            rmdir "$cache"
+        fi
+
+    } &>/dev/null # Hide garbage
+
+    return 0
+}
+
+
+List()
+{
+    local sep profileName status dhcpPids userPids
+
+    for ns in $( ip netns list ) ; do
+
+        [[ $ns =~ ^$prefix ]] || continue
+        echo -e -n "$sep"
+        
+        profileName=${ns#vpn_*}
+
+        status="$( GetVpnStatus $profileName )"
+
+        dhcpPids=$( pgrep --uid 0 --full '^dhclient .* '"$( dirname $cache )/$profileName"'/dhclient-script' )
+
+        userPids=$( ip netns pids $ns )
+
+        echo -e "# \e[1m$profileName\e[0m: ${status:-ERROR}"
+           [[ -n "$dhcpPids$userPids" ]] \
+        && ps --no-headers --forest --format pid,tname,user,cmd $dhcpPids $userPids 2>/dev/null
+
+        sep="\n"
+
+    done
+
+    exit 0
+}
+
+
+
+########
+# INIT #
+########
+
+
+# INIT: Constants
+connectTimeoutHalfSeconds=12
+prefix=vpn_
+
+
+# INIT: Parse opts
+while getopts hlvdrp:s:t: opt ; do
+    case "$opt" in
+        h) Usage ; exit    ;;
+        l) list='-l'       ;;
+        v) verbose='-v'    ;;
+        d) disconnect='-d' ;;
+        r) reconnect='-r'  ;;
+        p) [[ -n "$OPTARG" ]] && proxy="$OPTARG" && socks='' ;;
+        s) [[ -n "$OPTARG" ]] && socks="$OPTARG" && proxy='' ;;
+        t) [[ -n "$OPTARG" ]] && cache="$OPTARG"             ;;
+        [?]) Usage ;;
+    esac
+done
+shift $((OPTIND-1))
+
+
+# INIT: Check opts & args
+if [[ -n "$list" && -n "$disconnect" ]] \
+|| [[ -n "$list" && $# -ne 0 ]] \
+|| [[ -n "$disconnect" && $# -ne 1 ]] \
+|| [[ -z "$disconnect" && -z "$list" ]] && [[ $# -lt 3 || $# -gt 6 ]] ; then
+    Usage
+fi
+
+[[ -z "$cache" ]] && cache="/tmp/$1.vpngate"
+
+
+# INIT: Check root
+[[ $( id -u ) != "0" ]] && Die "Requires root privs"
+
+
+# INIT: DEPS: isc-dhcp-client
+   which dhclient &>/dev/null \
+|| apt-get install --yes --no-install-recommends isc-dhcp-client \
+|| Die "Failed installing apt package: isc-dhcp-client"
+
+
+
+
+########
+# MAIN #
+########
+
+
+if [[ -n "$list" ]] ; then
+    List
+elif [[ -n "$disconnect" ]] ; then
+    Disconnect "$1"
+else
+    [[ -n "$reconnect" ]] && Disconnect "$1"
+    Connect "$@"
+fi

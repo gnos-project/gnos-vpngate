@@ -1,0 +1,226 @@
+#!/bin/bash
+# ARGS $1: profileFile
+# ARGS $2: cachePath
+# ARGS $3: nodePath
+# ARGS $4: cmdPath
+# ARGS $5: cmdDisplay
+# ARGS $*: cmd
+
+
+########
+# FUNC #
+########
+
+
+# FUNC: System
+
+Usage ()
+{
+    Die "Usage: INTERNAL"
+}
+
+Die ()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+Say ()
+{
+    [[ -n "$verbose" ]] && echo "$@" >&2
+    return 0
+}
+
+
+# FUNC
+
+CntServers () # $1:TEXT $2:JSON
+{
+    cnt=$( jq '.data | length' "$2" )
+    if [[ -n "$cnt" ]] && [[ $cnt -gt 0 ]] ; then
+        Say "$1 servers: $cnt"
+    else
+        Die "No $1 servers found"
+    fi
+}
+
+CheckNetnsExists () # $1:NAME
+{
+    for i in $( ip netns list ) ; do
+        [[ "$i" == "$prefix$1" ]] && return 0
+    done
+    return 1
+}
+
+
+
+########
+# INIT #
+########
+
+
+# INIT: Constants
+appPath="$( dirname "$( readlink -f "$BASH_SOURCE" )" )"
+connector=vpnssl-connect
+prefix=vpn_
+
+
+# INIT: Check root
+[[ $( id -u ) != "0" ]] && Die "Requires root privs"
+
+
+# INIT: Parse opts
+while getopts lvdrp:s: opt ; do
+    case "$opt" in
+        l) list='-l'       ;;
+        v) verbose='-v'    ;;
+        d) disconnect='-d' ;;
+        r) reconnect='-r'  ;;
+        p) [[ -n "$OPTARG" ]] && proxy="$OPTARG" && socks='' ;;
+        s) [[ -n "$OPTARG" ]] && socks="$OPTARG" && proxy='' ;;
+        [?]) Usage ;;
+    esac
+done
+shift $((OPTIND-1))
+
+
+# INIT: Alternative actions
+if [[ -n "$list" ]] ; then
+    "$appPath/$connector" -t "$2" $list
+    exit $?
+elif [[ -n "$disconnect" && $# -ge 1 ]] ; then
+    "$appPath/$connector" -t "$2" $verbose $disconnect "$( basename $1 )"
+    ret=$?
+    [[ -d "$2/$1" ]] && rm -rf "$2/$1"
+    exit $ret
+fi
+
+
+# INIT: Check args: connect
+   [[ $# -lt 5 ]] \
+&& Die "Invalid args count"
+
+profileFile=$1
+cachePath=$2
+nodePath=$3
+cmdPath=$4
+cmdDisplay=$5
+shift 5
+
+
+# INIT: Profile
+source "$profileFile"
+profileName="$( basename "$profileFile" )"
+
+
+# INIT: Defaults
+nicName=$prefix$profileName
+nsName=$nicName
+[[ -z "$cmd" ]]    && cmd=bash
+
+
+# INIT: DEPS: net-tools
+# DEV: local-ipv4-address does not know to use `ip route`, `netstat` required
+   which netstat &>/dev/null \
+|| apt-get install --yes --no-install-recommends net-tools \
+|| Die "Failed installing apt package: net-tools"
+
+
+
+########
+# MAIN #
+########
+
+
+if [[ -z "$reconnect" ]] && CheckNetnsExists "$profileName" ; then
+
+    # Existing
+    nodisconnect=1
+
+elif [[ -n "$connect" ]] ; then
+
+    # Private connect
+    "$appPath/$connector" -t "$cachePath" $verbose $reconnect -p "$proxy" -s "$socks" $profileName $connect
+    ret=$?
+    [[ $ret -eq 0 || $ret -eq 42 ]] || Die "Connector failed: $connector"
+    [[ $ret -eq 42 ]] && nodisconnect=1
+
+else
+
+    # VPN Gate selector
+
+    # SYN-Scan & Filter & Sort by scan time
+    # DEV: requires root privs
+    pushd "$appPath/" &>/dev/null
+    PATH="$nodePath:$PATH" "$nodePath/node" "$appPath/vpngate-scan.js" \
+         "$cachePath/vpngate_filtered.json" \
+        >"$cachePath/vpngate_scanned.json"  \
+        2>/dev/null
+    ret=$?
+    popd "$appPath/" &>/dev/null
+    [[ "$ret" -ne 0 ]] && Die "TCP SYN-Scan failed"
+    chown --reference="$cachePath/vpngate_filtered.json" "$cachePath/vpngate_scanned.json"
+    CntServers "Scanned" "$cachePath/vpngate_scanned.json"
+
+    # Sort
+    [[ -z "$select" ]] && select='."SYN scan (ms)"'
+    jq '{data: .data | sort_by( '"$select"' ) }' \
+         "$cachePath/vpngate_scanned.json" \
+        >"$cachePath/vpngate_sorted.json" \
+    || Die "Sorting failed, select query: $select"
+    chown --reference="$cachePath/vpngate_scanned.json" "$cachePath/vpngate_sorted.json"
+    CntServers "Sorted" "$cachePath/vpngate_sorted.json"
+
+    # Select first
+    jq '{data: [.data[0]]}' \
+         "$cachePath/vpngate_sorted.json" \
+        >"$cachePath/vpngate_selected.json"
+    chown --reference="$cachePath/vpngate_sorted.json" "$cachePath/vpngate_selected.json"
+    Say "Selected target server:"
+    [[ -n "$verbose" ]] && jq '.data[0]' "$cachePath/vpngate_selected.json" >&2
+
+    # Extract
+    srvIp=$(  jq -r '.data[0] | ."IP address"'                      "$cachePath/vpngate_selected.json" )
+    srvTcp=$( jq -r '.data[0] | (."SSL-VPN TCP port"//""|tostring)' "$cachePath/vpngate_selected.json" )
+
+    # Connector
+    "$appPath/$connector" -t "$cachePath" $verbose $reconnect -p "$proxy" -s "$socks" $profileName $srvIp $srvTcp
+    ret=$?
+
+    [[ $ret -eq 0 || $ret -eq 42 ]] || Die "Connector failed: $connector"
+    [[ $ret -eq 42 ]] && nodisconnect=1
+
+fi
+
+
+# No Command
+if [[ $# -eq 0 ]] ; then
+    # echo "TIP: firejail --netns=$nsName firefox-esr-user-vpn" >&2 # --protocol=unix,inet,inet6,netlink
+    # echo "TIP: sudo ip -4 netns exec $nsName sudo --set-home -u \#$PKEXEC_UID DISPLAY=$cmdDisplay bash" >&2
+    exit 0
+elif [[ "$1" == "null" ]] ; then
+    Say "Nulled command"
+    exit  0
+fi
+
+
+# Command
+[[ $# -ne 0 ]] && Say "Running command: $*" || exit 0
+
+if [[ -n "$PKEXEC_UID" || -n "$SUDO_UID" ]] ; then
+    pushd "$cmdPath" &>/dev/null
+    ip -4 netns exec $nsName sudo --set-home -u \#${PKEXEC_UID:-$SUDO_UID} DISPLAY=$cmdDisplay "$@"
+    ret=$?
+    popd &>/dev/null
+else
+    ip -4 netns exec $nsName env DISPLAY=$cmdDisplay "$@"
+    ret=$?
+fi
+[[ $ret -ne 0 ]] && Say "Command exited with signal $ret"
+
+if [[ -z "$nodisconnect" ]] ; then
+    Say "Disconnecting profile: $profileName"
+    "$appPath/$connector" -t "$cachePath" $verbose -d $profileName &>/dev/null
+fi
+
+exit $ret

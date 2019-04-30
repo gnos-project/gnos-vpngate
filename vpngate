@@ -1,0 +1,408 @@
+#!/bin/bash
+# NAME  GNOS vpngate
+# DESC  VPN Gate client for SoftEther VPN-SSL protocol
+# AUTH  elias@gnos.in
+# DEPS  apt install npm jq net-tools isc-dhcp-client
+# DEPS  npm install ip local-ipv4-address raw-socket
+# DEPS  npm install -g phantomjs-prebuilt casperjs
+
+
+########
+# FUNC #
+########
+
+
+# FUNC: System
+
+Usage ()
+{
+    local self="$( basename "$( readlink -f "$BASH_SOURCE" )" )"
+    cat <<EOF >&2
+USAGE:
+  $self [ OPTS ... ] [ PROFILE_NAME | PROFILE_PATH [ COMMAND [ ARGS ... ] ] ]
+  $self -d PROFILE_NAME
+  $self -l
+  $self -h
+
+ARGS:
+  PROFILE_NAME    Profile name, stored in $profilePath/
+  PROFILE_PATH    Profile path
+  COMMAND         Command to execute, or "null" to override profile
+  ARGS            Command arguments
+
+OPTS:
+  -d              Disconnect profile
+  -l              List active profiles
+  -h              Show help
+  -r              Force reconnect
+  -u              Force cache update
+  -p HTTP_PROXY   HTTP proxy:     [http://][user[:password]@]host[:port]
+  -s SOCKS_PROXY  SOCKS4 proxy:  [socks://][user[:password]@]host[:port]
+  -v              Verbose output
+
+EOF
+    exit 1
+}
+
+Help ()
+{
+    cat <<EOF >&2
+NAME: $( basename "$( readlink -f "$BASH_SOURCE" )" )
+DESC: VPN Gate client for SoftEther VPN-SSL protocol
+AUTH: elias@gnos.in
+DEPS: SoftEther vpnclient + vpncmd
+DEPS: policykit-1 isc-dhcp-client npm jq
+FEAT:
+  polkit integration
+  scapping to JSON cache
+  jq filtering & selection
+  auto \$http_proxy support
+  HTTP & SOCKS4 proxy support
+  netns (Linux network namespaces)
+  user profiles with command execution
+
+$( Usage 2>&1 )
+
+PROFILE-FORMAT:  BASH
+  cmd            Command to execute
+  proxy          HTTP proxy
+  socks          SOCKS4 proxy
+  mirror         [VPN Gate] Alternative scrapping target
+  filter         [VPN Gate] Server-list filter, jq select syntax
+  select         [VPN Gate] Server-list sorter, jq sort_by syntax
+  connect        Private server "IP_ADDR TCP_PORT", args: $connector -h
+
+CACHE-FORMAT:    JSON: { data: [ { key: val, ... }, ... ] }
+  "Country code"                str notnull empty!
+  "DDNS hostname"               str null!
+  "IP address"                  str notnull notempty
+  "ISP hostname"                str null!
+  "Cumulative users"            int null!
+  "Cumulative transfers (GB)"   int null!
+  "Operator"                    str null!
+  "Ping (ms)"                   int null!
+  "Score"                       int null!
+  "SSL-VPN TCP port"            int notnull
+  "SYN scan (ms)"               int null!
+  "Throughput (Mbps)"           int null!
+  "Uptime (min)"                int null!
+  "VPN sessions"                int null!
+EOF
+    exit 0
+}
+
+Die ()
+{
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+Say ()
+{
+    [[ -n "$verbose" ]] && echo "$@" >&2
+    return 0
+}
+
+Own ()
+{
+       [[ $( id -u ) == "0" ]] && [[ -n "$PKEXEC_UID" || -n "$SUDO_UID" ]] \
+    && chown -R ${PKEXEC_UID:-$SUDO_UID} "$@"
+}
+
+# FUNC
+CntServers () # $1:TEXT $2:JSON
+{
+    cnt=$( jq '.data | length' "$2" )
+    if [[ -n "$cnt" ]] && [[ $cnt -gt 0 ]] ; then
+        Say "$1 servers: $cnt"
+    else
+        Die "No $1 servers found"
+    fi
+}
+
+CheckNetnsExists () # $1:NAME
+{
+    for i in $( ip netns list ) ; do
+        [[ "$i" == "$prefix$1" ]] && return 0
+    done
+    return 1
+}
+
+
+
+########
+# INIT #
+########
+
+# INIT: Constants
+prefix="vpn_"
+sudoCmd="pkexec"
+appPath="$( dirname "$( readlink -f "$BASH_SOURCE" )" )"
+cacheSeconds=7200 # 2 hours
+connector=vpnssl-connect
+proxy="$http_proxy"
+if [[ $( id -u ) == "0" ]] ; then
+    sudoCmd=""
+       [[ -n "$PKEXEC_UID" || -n "$SUDO_UID" ]] \
+    && HOME="$( getent passwd ${PKEXEC_UID:-$SUDO_UID} | cut -f 6 -d ":" )"
+fi
+profilePath="$HOME/.config/vpngate"
+appCachePath="$HOME/.cache/vpngate"
+mirror="" # TOCHECK https://bunkerbustervpn.com/vpngate.html
+
+
+# INIT: Check netns
+cnetns=$( ip netns identify $$ )
+[[ $cnetns =~ ^$prefix ]] && Die "Cannot run recursively, netns: $cnetns"
+
+
+# INIT: Parse opts
+while getopts hlivdrup:s: opt ; do
+    case "$opt" in
+        h) Help ; exit     ;;
+        l) list='-l'       ;;
+        i) install='-i'    ;;
+        v) verbose='-v'    ;;
+        d) disconnect='-d' ;;
+        r) reconnect='-r'  ;;
+        u) update='-u'     ;;
+        p) [[ -n "$OPTARG" ]] && proxy="$OPTARG" && socks='' ;;
+        s) [[ -n "$OPTARG" ]] && socks="$OPTARG" && proxy='' ;;
+        [?]) Usage ;;
+    esac
+done
+shift $((OPTIND-1))
+
+
+# INIT: Alternative actions: List
+if [[ -n "$list" && -z "$disconnect" && $# -eq 0 ]] ; then
+  $sudoCmd "$appPath/vpngate-priv" $list _dummy_ "$appCachePath/_dummy_" "$appCachePath"
+    exit $?
+elif [[ -z "$list" &&  -n "$disconnect" && $# -eq 1 ]] ; then
+    :
+elif [[ -n "$list$disconnect" ]] ; then
+    Usage
+fi
+
+
+# INIT: Sample Profiles
+if [[ ! -d "$profilePath" ]] ; then
+    mkdir -p "$profilePath"
+    cat <<'EOF' >"$profilePath/default"
+EOF
+    cat <<'EOF' >"$profilePath/fast"
+# DESC: High Throughput
+filter='( ."VPN sessions" > 0)'
+select='-."Throughput (Mbps)" / ."VPN sessions"'
+EOF
+    cat <<'EOF' >"$profilePath/443"
+# DESC: High Throughput
+filter='."SSL-VPN TCP port" == 443'
+EOF
+    cat <<'EOF' >"$profilePath/other"
+# DESC: TCP port 443 & Exclude current country & US
+country="$( curl -s ifconfig.io/country_code )|US" # BUG: returns T1 for tor addresses
+not="|not"
+filter='( ."SSL-VPN TCP port" == 443 ) and ( ."Country code" | test ("'"$country"'")'"$not"' )'
+EOF
+    cat <<'EOF' >"$profilePath/free"
+# DESC: Country code include list
+country="CN|HK|IR|KZ|RS|RU|VN" # Non-NATO nations
+# country="BR|ID|IN|MA|TR|TH"  # Sovereign states
+# not="|not"
+filter='( ."Country code" | test ("'"$country"'")'"$not"' ) and ( ."VPN sessions" > 0)'
+select='-."Throughput (Mbps)" / ."VPN sessions"'
+EOF
+    Own "$profilePath/"
+fi
+
+
+# INIT: Profile
+profile="$1"
+shift
+[[ -z "$profile" ]] && profile=default
+
+if [[ -f "$profile" ]] && bash -n "$profile" ; then
+    profileFile="$( readlink -f "$profile" )"
+elif [[ -f "$profilePath/$profile" ]] && bash -n "$profilePath/$profile" ; then
+    profileFile="$( readlink -f "$profilePath/$profile" )"
+else
+    Die "Invalid profile: $profile"
+fi
+profileName="$( basename "$profileFile" )"
+   [[ "$( echo -n "$profileName" | tr -c '_[:alnum:]' '-' )" == "$profileName" ]] \
+|| Die "Profile name has invalid characters: $profileName"
+source "$profileFile"
+
+
+# INIT: Profile defaults
+[[ -z "$cmd" ]] && cmd='bash'
+[[ -z "$filter" ]] && filter='true'
+cachePath="${appCachePath}/$profileName"
+
+
+# INIT: Alternative action: Disconnect
+if [[ -z "$list" &&  -n "$disconnect" && $# -eq 0 ]] ; then
+    $sudoCmd "$appPath/vpngate-priv" $verbose $disconnect $profileName "$appCachePath/$profileName"
+    ret=$?
+    exit $ret
+fi
+
+
+# INIT: Check DEPS
+
+## DEPS: self
+for i in $connector vpngate-priv vpngate-scrap.js vpngate-scan.js ; do
+    if [[ ! -f "$appPath/$i" ]] ; then
+        Die "Missing internal: $i"
+    fi
+done
+
+## DEPS: policykit-1
+if [[ $( id -u ) != "0" ]] ; then
+    pkexec --version &>/dev/null \
+|| Die "Missing dependency: policykit-1"
+fi
+
+## DEPS: jq
+   jq --version &>/dev/null \
+|| Die "Missing dependency: jq"
+
+## DEPS: node
+if [[ -z "$NVM_DIR" && -r "$HOME/.nvm/nvm.sh" ]] ; then
+  source "$HOME/.nvm/nvm.sh"
+fi
+if [[ -d "$NVM_BIN" && -x "$NVM_BIN/node" ]] ; then
+    nodePath="$NVM_BIN"
+# BUG /proc/*/environ IS NOT UPDATED
+# elif [[ $( id -u ) == "0" ]] && [[ -n "$PKEXEC_UID" || -n "$SUDO_UID" ]] ; then
+#   # TIP use strings instead of \0 parsing
+#     while IFS='' read -r -d $'\0' line || [[ -n "$line" ]]; do
+#         [[ "${line%=*}" == "NVM_BIN" ]] && nodePath="${line#*=}"
+#     done <"/proc/$( printf '%s' $( ps -o ppid= $$ ) )/environ"
+else
+    nodePath="$( dirname "$( which node )" )"
+fi
+[[ -n "$nodePath" ]] || Die "Missing dependency: node"
+
+
+## DEPS: node modules
+for i in raw-socket ip local-ipv4-address ; do
+    if [[ $( id -u ) != "0" && ! -d "$appPath/node_modules/$i"  ]] ; then
+        which npm &>/dev/null || Die "Missing npm for installing package: $i"
+        pushd "$appPath/" &>/dev/null
+        npm install $i
+        ret=$?
+        popd &>/dev/null
+        [[ $ret -eq 0 ]] || Die "Failed installing npm package: $i"
+    elif [[ ! -d "$appPath/node_modules/$i" ]] ; then
+        Die "Will not install npm package as root: $i"
+    fi
+done
+
+## DEPS: node globals
+for i in phantomjs-prebuilt:phantomjs casperjs ; do
+    if [[ $i =~ : ]] ; then
+      j=${i%%:*}
+      i=${i##*:}
+    else
+      j=$i
+    fi
+    if [[ $( id -u ) != "0" ]] && ! PATH="$nodePath:$PATH" which $i &>/dev/null ; then
+        which npm &>/dev/null || Die "Missing npm for installing GLOBAL package: $i"
+        npm install -g $j || Die "Failed installing npm GLOBAL package: $i"
+    elif ! PATH="$nodePath:$PATH" which $i &>/dev/null ; then
+        Die "Will not install npm GLOBAL package as root: $i"
+    fi
+done
+
+
+# INIT: Alternative action: Install
+if [[ -n "$install" ]] ; then
+  Say "Installation succedeed"
+  exit 0
+fi
+
+
+# INIT: Check Profile
+
+## Check filter syntax
+notnull='{ "Country code": "", "IP address": ".", "SSL-VPN TCP port": 1 }'
+jq "$filter" <<<"$notnull" &>/dev/null || Die "Invalid filter: $filter"
+
+## Check select syntax
+if [[ -n "$select" ]] ; then
+    jq "sort_by($select)" <<<'[]' &>/dev/null || Die "Invalid select: $select"
+fi
+
+## Merge cmd
+if [[ $# -eq 0 && -n "$cmd" && "$cmd" != "null" ]] ; then
+    eval exec "$( readlink -f "$BASH_SOURCE" )" $verbose $disconnect $reconnect $update "$profileFile" $cmd
+fi
+
+## Check cmd
+if [[ $# -ne 0 && "$1" != "null" ]] ; then
+    which "$1" &>/dev/null || Die "Unknown command: $1"
+fi
+
+
+
+########
+# MAIN #
+########
+
+
+if [[ -z "$reconnect" ]] && CheckNetnsExists "$profileName" ; then
+    
+    if [[ $# -eq 0 ]] ; then
+        Say "Existing netns, try -r to force reconnect"
+        exit 0
+    fi
+
+elif [[ -z "$connect" ]] ; then
+
+    # Scrap & Cache
+    if [[ -f "$appCachePath/cache.json" ]] \
+    && [[ -s "$appCachePath/cache.json" ]] \
+    && [[ -z "$update" ]] \
+    && [[ ! -w "$appCachePath/cache.json" \
+       || $(( $( date -d now "+%s" ) - $( stat --format=%Y "$appCachePath/cache.json" ) )) -lt $cacheSeconds \
+       ]] ; then
+
+           [[ ! -w "$appCachePath/cache.json" ]] \
+        && Say "Frozen READ-ONLY cache: $appCachePath/cache.json" \
+        || Say "Using cache"
+        CntServers "Cached" "$appCachePath/cache.json"
+
+    else
+
+        mkdir -p "$appCachePath/"
+           [[ -w "$appCachePath/" ]] \
+        && [[ -w "$appCachePath/cache.json" || ! -e "$appCachePath/cache.json" ]] \
+        || Die "Cannot update cache file: $appCachePath/cache.json"
+
+        # Scrap + Filter null tcp port
+        Say "Scrapping VPN Gate, please wait ..."
+        pushd "$appPath/" &>/dev/null
+        PATH="$nodePath:$PATH" "$appPath/vpngate-scrap.js" "$mirror" \
+          >"$appCachePath/cache.json"
+        ret=$?
+        popd &>/dev/null
+        [[ "$ret" -ne 0 ]] && Die "Scrapping failed" # DEV: returns 0 on crash
+        Own "$appCachePath/cache.json"
+        CntServers "Scrapped" "$appCachePath/cache.json"
+
+    fi
+
+    # Filter user rules
+    mkdir -p "$cachePath/"
+    jq '{data: [ .data[] | select( '"$filter"' ) ] }' \
+         "$appCachePath/cache.json" \
+        >"$cachePath/vpngate_filtered.json" \
+    || Die "Filtering failed, select query: $filter"
+    Own "$cachePath/vpngate_filtered.json"
+    CntServers "Filtered" "$cachePath/vpngate_filtered.json"
+fi
+
+# Privileged
+$sudoCmd "$appPath/vpngate-priv" $verbose $reconnect -p "$proxy" -s "$socks" "$profileFile" "$cachePath" "$nodePath" "$(pwd)" "$DISPLAY" "$@"
