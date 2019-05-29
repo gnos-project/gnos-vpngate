@@ -2,7 +2,7 @@
 # NAME  GNOS vpngate
 # DESC  VPN Gate client for SoftEther VPN-SSL protocol
 # AUTH  elias@gnos.in
-# DEPS  apt install npm jq net-tools isc-dhcp-client
+# DEPS  apt install npm jq net-tools isc-dhcp-client yad
 # DEPS  npm install ip local-ipv4-address raw-socket
 # DEPS  npm install -g phantomjs-prebuilt casperjs
 
@@ -33,12 +33,13 @@ ARGS:
 OPTS:
   -d              Disconnect profile
   -l              List active profiles
-  -h              Show help
   -r              Force reconnect
   -u              Force cache update
   -p HTTP_PROXY   HTTP proxy:     [http://][user[:password]@]host[:port]
   -s SOCKS_PROXY  SOCKS4 proxy:  [socks://][user[:password]@]host[:port]
+  -g              GUI server selector
   -v              Verbose output
+  -h              Show help
 
 EOF
     exit 1
@@ -157,7 +158,7 @@ cnetns=$( ip netns identify $$ )
 
 
 # INIT: Parse opts
-while getopts hlivdrup:s: opt ; do
+while getopts hlivdrugp:s: opt ; do
     case "$opt" in
         h) Help ; exit     ;;
         l) list='-l'       ;;
@@ -166,6 +167,7 @@ while getopts hlivdrup:s: opt ; do
         d) disconnect='-d' ;;
         r) reconnect='-r'  ;;
         u) update='-u'     ;;
+        g) gui='-g'        ;;
         p) [[ -n "$OPTARG" ]] && proxy="$OPTARG" && socks='' ;;
         s) [[ -n "$OPTARG" ]] && socks="$OPTARG" && proxy='' ;;
         [?]) Usage ;;
@@ -337,7 +339,7 @@ fi
 
 ## Merge cmd
 if [[ $# -eq 0 && -n "$cmd" && "$cmd" != "null" ]] ; then
-    eval exec "$( readlink -f "$BASH_SOURCE" )" $verbose $disconnect $reconnect $update "$profileFile" $cmd
+    eval exec "$( readlink -f "$BASH_SOURCE" )" $gui $verbose $disconnect $reconnect $update "$profileFile" $cmd
 fi
 
 ## Check cmd
@@ -405,4 +407,4 @@ elif [[ -z "$connect" ]] ; then
 fi
 
 # Privileged
-$sudoCmd "$appPath/vpngate-priv" $verbose $reconnect -p "$proxy" -s "$socks" "$profileFile" "$cachePath" "$nodePath" "$(pwd)" "$DISPLAY" "$@"
+$sudoCmd "$appPath/vpngate-priv" $gui $verbose $reconnect -p "$proxy" -s "$socks" "$profileFile" "$cachePath" "$nodePath" "$(pwd)" "$DISPLAY" "$@"

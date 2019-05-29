@@ -21,7 +21,15 @@ Usage ()
 
 Die ()
 {
-    echo "ERROR: $*" >&2
+    if [[ -n "$gui" && -n "$guiDeps" ]] ; then
+        sudo --set-home -u \#${PKEXEC_UID:-$SUDO_UID} DISPLAY=$cmdDisplay yad \
+            --center --no-buttons --width=400 \
+            --window-icon="gnome-networktool" --image="gnome-networktool" --image-on-top \
+            --title="VpnGate: $profileName profile ERROR" \
+            --text="$*"
+    else
+        echo "ERROR: $*" >&2
+    fi
     exit 1
 }
 
@@ -63,6 +71,7 @@ CheckNetnsExists () # $1:NAME
 appPath="$( dirname "$( readlink -f "$BASH_SOURCE" )" )"
 connector=vpnssl-connect
 prefix=vpn_
+flagsDir="/usr/local/share/$( basename "$appPath" )/flags"
 
 
 # INIT: Check root
@@ -70,12 +79,13 @@ prefix=vpn_
 
 
 # INIT: Parse opts
-while getopts lvdrp:s: opt ; do
+while getopts lvdrgp:s: opt ; do
     case "$opt" in
         l) list='-l'       ;;
         v) verbose='-v'    ;;
         d) disconnect='-d' ;;
         r) reconnect='-r'  ;;
+        g) gui='-g'        ;;
         p) [[ -n "$OPTARG" ]] && proxy="$OPTARG" && socks='' ;;
         s) [[ -n "$OPTARG" ]] && socks="$OPTARG" && proxy='' ;;
         [?]) Usage ;;
@@ -126,6 +136,28 @@ nsName=$nicName
 || Die "Failed installing apt package: net-tools"
 
 
+# INIT: DEPS: flags
+if [[ -n "$gui" && ! -f "$flagsDir/_unknown.png" ]] ; then
+       apt-get install --yes --no-install-recommends yad \
+    || Die "Failed installing apt package: yad"
+
+    tmpFlags=$( mktemp -d )
+
+       curl -s --location --fail --connect-timeout 10 --retry 3 \
+        https://github.com/gosquared/flags/archive/master.zip \
+        >"$tmpFlags/master.zip" \
+    && unzip "$tmpFlags/master.zip" 'flags-master/flags/flags-iso/flat/16/*' \
+        -d "$tmpFlags" &>/dev/null \
+    && mkdir -p "$flagsDir" \
+    && mv -T "$tmpFlags/flags-master/flags/flags-iso/flat/16/" "$flagsDir" \
+    || Die "Failed installing gosquared/flags"
+
+    rm -rf "$tmpFlags"
+
+fi
+[[ -n "$gui" ]] && guiDeps=OK
+
+
 
 ########
 # MAIN #
@@ -171,10 +203,61 @@ else
     chown --reference="$cachePath/vpngate_scanned.json" "$cachePath/vpngate_sorted.json"
     CntServers "Sorted" "$cachePath/vpngate_sorted.json"
 
-    # Select first
-    jq '{data: [.data[0]]}' \
-         "$cachePath/vpngate_sorted.json" \
-        >"$cachePath/vpngate_selected.json"
+    # GUI
+    if [[ -n "$gui" ]] ; then
+
+
+        # Flags support
+        if [[ -f "$flagsDir/_unknown.png" ]] ; then
+            flagsYad="--column=:IMG"
+            flagsJq="
+$flagsDir/\\(if (.\"Country code\" | length) > 0 then .\"Country code\" else \"_unknown\" end).png"
+        fi
+
+        # GUI server selector
+        sudo --set-home -u \#${PKEXEC_UID:-$SUDO_UID} DISPLAY=$cmdDisplay yad \
+            --width="900" --height="600" --center --no-buttons \
+            --window-icon="gnome-networktool" --image="gnome-networktool" --image-on-top \
+            --title="VpnGate: $profileName profile ($( jq '.data | length' "$cachePath/vpngate_sorted.json" ) servers)" \
+            --text="Please select VPN server:" \
+            --list --listen \
+            --hide-column=1 \
+            --print-column=1 --separator="" \
+            --column="return" \
+            $flagsYad \
+            --column="CC" \
+            --column="Name" \
+            --column="Ping":NUM \
+            --column="Mbps":NUM \
+            --column="Total":NUM \
+            --column="Users":NUM \
+            --column="Total":NUM \
+            --column="Hours":NUM \
+            --column="Endpoint" \
+            >"$cachePath/vpngate_selected.json" 2>/dev/null \
+            <  <( jq -r '.data[] | "{ \"data\": [ \(.) ] }'"$flagsJq"'
+\(."Country code")
+\(."Operator")
+\(."SYN scan (ms)")
+\(."Throughput (Mbps)"|floor)M
+\(."Cumulative transfers (GB)"|floor)G
+\(."VPN sessions")
+\(."Cumulative users")
+\(."Uptime (min)" / 60 | floor)
+\(."IP address"):\(."SSL-VPN TCP port")"' \
+                  "$cachePath/vpngate_sorted.json" \
+                )
+        # TOCHECK ."DDNS hostname" ."ISP hostname"
+
+        [[ $? -ne 0 || ! -s "$cachePath/vpngate_selected.json" ]] && Die "No GUI answer"
+
+    else
+        # Select first
+        jq '{data: [.data[0]]}' \
+             "$cachePath/vpngate_sorted.json" \
+            >"$cachePath/vpngate_selected.json"
+    fi
+
     chown --reference="$cachePath/vpngate_sorted.json" "$cachePath/vpngate_selected.json"
     Say "Selected target server:"
     [[ -n "$verbose" ]] && jq '.data[0]' "$cachePath/vpngate_selected.json" >&2

@@ -299,11 +299,10 @@ Connect () # $1:PROFILENAME $2:IP $3:TCP $4:USERNAME $5:PASSWORD $6:HUBNAME
 
     # Softether: Check already running
     status=$( GetVpnStatus $profileName )
-    if [[ $status =~ ^Connection\ Completed ]] ; then
+    if [[ -d "/etc/netns/$nsName" && $status =~ ^Connection\ Completed ]] ; then
         Say "Profile already connected: $profileName"
         exit 42
     fi
-# TODO more checks: netns, ip addr ?
 
 
     # Softether: Connect VPN
