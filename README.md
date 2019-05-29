@@ -1,3 +1,5 @@
+<p align="center"><img src="https://gnos.in/img/shot/common/gnos-vpngate_0.png"></img></p>
+
 # VPN Gate Linux client for Softether SSL-VPN protocol
 
 Written with `bash` & `node.js` for [GNOS](https://gnos.in).
@@ -25,6 +27,7 @@ DEPS: SoftEther vpnclient + vpncmd
 DEPS: policykit-1 isc-dhcp-client npm jq
 FEAT:
   polkit integration
+  GUI server selector
   scapping to JSON cache
   jq filtering & selection
   auto $http_proxy support
@@ -52,6 +55,7 @@ OPTS:
   -u              Force cache update
   -p HTTP_PROXY   HTTP proxy:     [http://][user[:password]@]host[:port]
   -s SOCKS_PROXY  SOCKS4 proxy:  [socks://][user[:password]@]host[:port]
+  -g              GUI server selector
   -v              Verbose output
 
 PROFILE-FORMAT:  BASH
@@ -145,6 +149,7 @@ cmd='bash -c '\''echo "quoted   text"'\'
 | `verbose`      | `""`    | Set to `-v` to force verbose output                            |
 | `reconnect`    | `""`    | Set to `-r` to force reconnection                              |
 | `update`       | `""`    | Set to `-u` to disable cache                                   |
+| `gui`          | `""`    | Set to `-g` to enable GUI server selector                      |
 | `mirror`       | `""`    | Scrapping url, read <https://bunkerbustervpn.com/vpngate.html> |
 
 ## Installation
@@ -154,6 +159,7 @@ cmd='bash -c '\''echo "quoted   text"'\'
 - Softether `vpnclient`, integrated with `systemd`.
 - Softether `vpncmd`, declared in `PATH`.
 - Node.js (lts/10), managed by `nvm`.
+- OPTIONAL, `yad` for GUI
 
 ### Copy scripts
 
@@ -172,7 +178,7 @@ vpngate -i
 ### Manual dependencies installation
 
 ```
-sudo apt-get install npm jq isc-dhcp-client
+sudo apt-get install npm jq isc-dhcp-client yad
 sudo npm install -g phantomjs casperjs
 sudo mkdir /opt/vpngate/node_modules
 sudo chown $(id -u) /opt/vpngate/node_modules
