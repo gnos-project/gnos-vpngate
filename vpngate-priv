@@ -137,26 +137,30 @@ nsName=$nicName
 || Die "Failed installing apt package: net-tools"
 
 
-# INIT: DEPS: flags
-if [[ -n "$gui" && ! -f "$flagsDir/_unknown.png" ]] ; then
-       apt-get install --yes --no-install-recommends yad \
+# INIT: DEPS: GUI
+if [[ -n "$gui" ]] ; then
+
+      which yad &>/dev/null \
+    || apt-get install --yes --no-install-recommends yad \
     || Die "Failed installing apt package: yad"
 
-    tmpFlags=$( mktemp -d )
+    if [[ ! -f "$flagsDir/_unknown.png" ]] ; then
+        tmpFlags=$( mktemp -d )
 
-       curl -s --location --fail --connect-timeout 10 --retry 3 \
-        https://github.com/gosquared/flags/archive/master.zip \
-        >"$tmpFlags/master.zip" \
-    && unzip "$tmpFlags/master.zip" 'flags-master/flags/flags-iso/flat/16/*' \
-        -d "$tmpFlags" &>/dev/null \
-    && mkdir -p "$flagsDir" \
-    && mv -T "$tmpFlags/flags-master/flags/flags-iso/flat/16/" "$flagsDir" \
-    || Die "Failed installing gosquared/flags"
-
-    rm -rf "$tmpFlags"
-
+           curl -s --location --fail --connect-timeout 10 --retry 3 \
+            "https://github.com/gosquared/flags/archive/master.zip" \
+            >"$tmpFlags/master.zip" \
+        && unzip "$tmpFlags/master.zip" 'flags-master/flags/flags-iso/flat/16/*' \
+            -d "$tmpFlags" &>/dev/null \
+        && mkdir -p "$flagsDir" \
+        && mv -T "$tmpFlags/flags-master/flags/flags-iso/flat/16/" "$flagsDir" \
+        || Die "Failed installing gosquared/flags"
+        
+        rm -rf "$tmpFlags"
+    fi
+    
+    guiDeps=OK
 fi
-[[ -n "$gui" ]] && guiDeps=OK
 
 
 
