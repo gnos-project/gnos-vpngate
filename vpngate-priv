@@ -26,7 +26,8 @@ Die ()
             --center --no-buttons --width=400 \
             --window-icon="gnome-networktool" --image="gnome-networktool" --image-on-top \
             --title="VpnGate: $profileName profile ERROR" \
-            --text="$*"
+            --text="$*" \
+            2>/dev/null
     else
         echo "ERROR: $*" >&2
     fi
