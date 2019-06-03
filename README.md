@@ -188,10 +188,10 @@ npm install ip local-ipv4-address raw-socket
 
 ### User alias
 
-To manually sudo instead of default auto pkexec use this alias:
+To use sudo instead of default automatic pkexec use this alias:
 
 ```
-alias vpngate="sudo --set-home NVM_BIN="$NVM_BIN" /opt/vpngate/vpngate -v"
+alias vpngate="sudo --set-home NVM_BIN='$NVM_BIN' /opt/vpngate/vpngate -v"
 ```
 
 ### Root alias
