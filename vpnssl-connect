@@ -449,7 +449,7 @@ List()
         [[ $ns =~ ^$prefix ]] || continue
         echo -e -n "$sep"
         
-        profileName=${ns#vpn_*}
+        profileName=${ns#$prefix*}
 
         status="$( GetVpnStatus $profileName )"
 
