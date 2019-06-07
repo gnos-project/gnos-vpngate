@@ -27,7 +27,7 @@ USAGE:
 ARGS:
   PROFILE_NAME    Profile name, stored in $profilePath/
   PROFILE_PATH    Profile path
-  COMMAND         Command to execute, or "null" to override profile
+  COMMAND         Command to execute, or "null" to keep connected
   ARGS            Command arguments
 
 OPTS:

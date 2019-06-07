@@ -44,8 +44,8 @@ USAGE:
 ARGS:
   PROFILE_NAME    Profile name, stored in ~/.config/vpngate/
   PROFILE_PATH    Profile path
-  COMMAND         Command to execute, or "null"
-  ARGS            Command argument
+  COMMAND         Command to execute, or "null" to keep connected
+  ARGS            Command arguments
 
 OPTS:
   -d              Disconnect profile
