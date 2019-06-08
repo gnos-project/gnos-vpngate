@@ -395,7 +395,7 @@ EOF
     && apparmor_parser /etc/apparmor.d/sbin.dhclient
 
     local ifconfig="$( ip netns exec $nsName ip addr show dev $nicName 2>/dev/null )"
-    [[ -n "$verbose" && -n "$ifconfig" ]] && echo "$ifconfig"
+    [[ -n "$verbose" && -n "$ifconfig" ]] && echo "$ifconfig" >&2
     grep -q 'inet ' <<<"$ifconfig" || Die "DHCP assignation failed"
 
     return 0
