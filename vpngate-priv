@@ -145,6 +145,8 @@ if [[ -n "$gui" ]] ; then
     || Die "Failed installing apt package: yad"
 
     if [[ ! -f "$flagsDir/_unknown.png" ]] ; then
+
+        Say "Installing flags"
         tmpFlags=$( mktemp -d )
 
            curl -s --location --fail --connect-timeout 10 --retry 3 \
@@ -210,7 +212,6 @@ else
 
     # GUI
     if [[ -n "$gui" ]] ; then
-
 
         # Flags support
         if [[ -f "$flagsDir/_unknown.png" ]] ; then
