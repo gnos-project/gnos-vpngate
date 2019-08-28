@@ -255,7 +255,7 @@ $flagsDir/\\(if (.\"Country code\" | length) > 0 then .\"Country code\" else \"_
                 )
         # TOCHECK ."DDNS hostname" ."ISP hostname"
 
-        [[ $? -ne 0 || ! -s "$cachePath/vpngate_selected.json" ]] && Die "No GUI answer"
+        [[ $? -ne 0 || ! -s "$cachePath/vpngate_selected.json" ]] && exit 1
 
     else
         # Select first
